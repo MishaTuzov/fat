@@ -11,12 +11,36 @@
 
 const std::vector<std::string> find_mouth = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
 
-std::string to_lower_case(std::string &s) {
+std::string to_lower_case(std::string const&s) {
     auto t = s;
     for (int i = 0; i < s.size(); i++) {
         t[i] = std::tolower(s[i]);
     }
     return t;
+}
+
+unsigned int char_to_uint(char c) {
+    return static_cast<unsigned int>(static_cast<unsigned char>(c));
+}
+
+std::string remove_whitespace(std::string const& s) {
+    std::string result;
+    for (char c : s) {
+        if (!std::isspace(static_cast<unsigned char>(c))) {
+            result += c;
+        }
+    }
+    return result;
+}
+
+std::string remove_char_from_str(std::string const&s, char d) {
+    std::string result;
+    for (char c : s) {
+        if (c != d) {
+            result += c;
+        }
+    }
+    return result;
 }
 
 namespace FAT {
@@ -49,6 +73,7 @@ enum FAT_TYPES {
 
 struct File_info {
     std::string name = "";
+    std::string name_no_whitespace = "";
     std::string long_name = "";
     std::string long_name_lower = "";
     std::uint_fast32_t attr = 0;
@@ -110,7 +135,7 @@ class Disk {
         std::uint32_t FAT_INDEX_LEN = 0;
 
     private:
-        std::uint64_t extract_with_endian(std::string& s, int from, int amount, bool is_little_endian = true) {
+        std::uint64_t extract_with_endian(std::string const& s, int from, int amount, bool is_little_endian = true) {
             std::uint64_t result = 0;
             if (is_little_endian) {
                 for (int i = 0; i < amount; i++) {
@@ -200,9 +225,10 @@ class Disk {
             std::cout << "COUNT_OF_CLUSTERS " << COUNT_OF_CLUSTERS << std::endl;
         }
     
-        File_info parse_file(std::string& s, int offset) {
+        File_info parse_file(std::string const& s, int offset) {
             File_info file_info;
             file_info.name = s.substr(offset, 11);
+            file_info.name_no_whitespace = remove_whitespace(file_info.name);
             file_info.low_claster_index = extract_with_endian(s, offset + 0x1a, 2);
             file_info.high_claster_index = extract_with_endian(s, offset + 0x14, 2);
             file_info.size = extract_with_endian(s, offset + 0x1c, 4);
@@ -214,13 +240,13 @@ class Disk {
             // file_info.year_last_access = (file_info.date_last_access & 0xfe00) >> 9;
 
             file_info.claster_index = file_info.low_claster_index + file_info.high_claster_index * WORD;
-            if (file_info.name[0] == static_cast<char>(0xe5) || file_info.name[0] == static_cast<char>(0x05)) {
+            if (file_info.name[0] == static_cast<char>(0xe5)) {
                 file_info.is_deleted = true;
             }
             return file_info;
         }
 
-        LFN_chain parse_LFN(std::string& s, int offset) {
+        LFN_chain parse_LFN(std::string const& s, int offset) {
             LFN_chain lfn;
             for (int i = 0; i < 10; i += 2) {
                 char c = s[offset + 0x01 + i];
@@ -243,23 +269,30 @@ class Disk {
         }
 
         std::uint32_t get_next_claster_index(std::uint32_t current) {
-            if (current > COUNT_OF_CLUSTERS + 1 && current < FAT_CLASTER_MIN || current > FAT_CLASTER_MAX) {
+            if (current > COUNT_OF_CLUSTERS + 1 || current > FAT_CLASTER_MAX || current < FAT_CLASTER_MIN) {
                 throw std::string("Current claster index is out of range");
             }
-            // std::cout << "We seek to " << FIRST_FAT_SECTOR * SECTOR_SIZE + (current - 2) * FAT_INDEX_LEN << std::endl;
-            // seek(FIRST_FAT_SECTOR * SECTOR_SIZE + (current - 2) * FAT_INDEX_LEN);
-
-            // char buffer[4];
-            // fread(buffer, FAT_INDEX_LEN, 1, fd);
-            // if (ferror(fd)) {
-            //     throw std::string("Error in file reading");
-            // }
-            // std::string temp(buffer, FAT_INDEX_LEN);
-            // return extract_with_endian(temp, 0, FAT_INDEX_LEN);
 
             std::uint32_t byte_addres = FIRST_FAT_SECTOR * SECTOR_SIZE + (current) * FAT_INDEX_LEN;
             std::string sector = read_sector(byte_addres / SECTOR_SIZE);
             return extract_with_endian(sector, byte_addres % SECTOR_SIZE, FAT_INDEX_LEN);
+        }
+
+        std::vector<std::uint32_t> get_claster_chain(std::uint32_t start) {
+            std::uint32_t current = start;
+            std::vector<std::uint32_t> chain{current};
+            while (FAT_CLASTER_MIN <= current && current <= std::min(FAT_CLASTER_MAX, COUNT_OF_CLUSTERS + 1)) {
+                current = get_next_claster_index(current);
+                chain.push_back(current);
+            }
+            if (current == FAT_BAD) {
+                throw std::string("Chain of clusters end in bad cluster");
+            }
+            if (!(FAT_EOC_MIN <= current && current <= FAT_EOC_MAX)) {
+                std::cerr << "Bad Cluster index : 0x" << std::hex << current << std::dec << std::endl;
+                throw std::string("Chain of clusters end in not EOC cluster");
+            }
+            return chain;
         }
     
         void dump_fat_for_cluster(std::uint32_t cluster) {
@@ -267,28 +300,28 @@ class Disk {
             std::cout << "Here is FAT table around cluster : " << std::dec << cluster << " with byte address " << std::hex << byte_addres << std::dec << std::endl;
             std::string s = read_sector(byte_addres / SECTOR_SIZE);
             for (int i = 0; i < s.size(); i++) {
-                std::cout << std::hex << static_cast<unsigned int>(static_cast<unsigned char>(s[i])) << " ";
+                std::cout << std::hex << char_to_uint(s[i]) << " ";
             }
             std::cout << std::dec << std::endl;
             std::uint32_t i = byte_addres % SECTOR_SIZE;
-            std::cout << "Here is exact value of asked dword : " << std::hex << static_cast<unsigned int>(static_cast<unsigned char>(s[i])) << " "
-            << static_cast<unsigned int>(static_cast<unsigned char>(s[i+1])) << " "
-            << static_cast<unsigned int>(static_cast<unsigned char>(s[i+2])) << " "
-            << static_cast<unsigned int>(static_cast<unsigned char>(s[i+3])) << std::dec << std::endl;
+            std::cout << "Here is exact value of asked dword : " << std::hex << char_to_uint(s[i]) << " "
+            << char_to_uint(s[i+1]) << " "
+            << char_to_uint(s[i+2]) << " "
+            << char_to_uint(s[i+3]) << std::dec << std::endl;
 
 
             byte_addres = FIRST_FAT_SECTOR * SECTOR_SIZE + FAT_TABLE_SECTOR_AMOUNT * SECTOR_SIZE + (cluster) * FAT_INDEX_LEN;
             std::cout << "Here is FAT2 table around cluster : " << std::dec << cluster << " with byte address " << std::hex << byte_addres << std::dec << std::endl;
             s = read_sector(byte_addres / SECTOR_SIZE);
             for (int i = 0; i < s.size(); i++) {
-                std::cout << std::hex << static_cast<unsigned int>(static_cast<unsigned char>(s[i])) << " ";
+                std::cout << std::hex << char_to_uint(s[i]) << " ";
             }
             std::cout << std::dec << std::endl;
             i = byte_addres % SECTOR_SIZE;
-            std::cout << "Here is exact value of asked dword : " << std::hex << static_cast<unsigned int>(static_cast<unsigned char>(s[i])) << " "
-            << static_cast<unsigned int>(static_cast<unsigned char>(s[i+1])) << " "
-            << static_cast<unsigned int>(static_cast<unsigned char>(s[i+2])) << " "
-            << static_cast<unsigned int>(static_cast<unsigned char>(s[i+3])) << std::dec << std::endl;
+            std::cout << "Here is exact value of asked dword : " << std::hex << char_to_uint(s[i]) << " "
+            << char_to_uint(s[i+1]) << " "
+            << char_to_uint(s[i+2]) << " "
+            << char_to_uint(s[i+3]) << std::dec << std::endl;
         }
     public:
         Disk() {
@@ -352,7 +385,6 @@ class Disk {
         }
 
         std::string read_cluster(int cluster_pos) {
-            std::cout << "Current position is  " << ((cluster_pos - 2) * SECTOR_PER_CLASTER + FIRST_DATA_SECTOR) * SECTOR_SIZE << std::endl;
             seek(((cluster_pos - 2) * SECTOR_PER_CLASTER + FIRST_DATA_SECTOR) * SECTOR_SIZE);
             std::string answer;
             for (int i = 0; i < (SECTOR_SIZE * SECTOR_PER_CLASTER) / MIN_SECTOR_SIZE; i++) {
@@ -365,51 +397,13 @@ class Disk {
             if (first_cluster == 0) {
                 first_cluster = ROOT_CATALOG_CLASTER_INDEX;
             }
-            std::uint32_t cluster_index = first_cluster;
             Folder folder;
             std::string LFN = "";
-            dump_fat_for_cluster(cluster_index);
 
-                std::cout << "=== DEBUG parse_folder ===" << std::endl;
-    std::cout << "first_cluster = " << first_cluster << " (hex: 0x" << std::hex << first_cluster << std::dec << ")" << std::endl;
-    std::cout << "fat_type = " << fat_type << std::endl;
-    std::cout << "COUNT_OF_CLUSTERS = " << COUNT_OF_CLUSTERS << std::endl;
-    std::cout << "FAT_CLASTER_MIN = " << FAT_CLASTER_MIN << std::endl;
-    std::cout << "FAT_CLASTER_MAX = " << FAT_CLASTER_MAX << std::endl;
-    std::cout << "FAT_EOC_MIN = 0x" << std::hex << FAT_EOC_MIN << std::dec << std::endl;
-    std::cout << "FAT_EOC_MAX = 0x" << std::hex << FAT_EOC_MAX << std::dec << std::endl;
-    int cluster_count = 0;
+            auto chain = get_claster_chain(first_cluster);
 
-            while (FAT_CLASTER_MIN <= cluster_index && cluster_index <= std::min(FAT_CLASTER_MAX, COUNT_OF_CLUSTERS + 1)) {
-                cluster_count++;
-        std::cout << "\n--- Reading cluster #" << cluster_count << " ---" << std::endl;
-        std::cout << "cluster_index = " << cluster_index << " (hex: 0x" << std::hex << cluster_index << std::dec << ")" << std::endl;
-
-
-                std::cout << "Current cluster index is " << cluster_index << std::endl;
-                auto data = read_cluster(cluster_index);
-                        std::cout << "Data size = " << data.size() << " bytes" << std::endl;
-
-
-        // Проверяем, не пустые ли данные
-        bool all_zero = true;
-        for (char c : data) {
-            if (c != 0) {
-                all_zero = false;
-                break;
-            }
-        }
-        if (all_zero) {
-            std::cout << "WARNING: Cluster contains only zeros!" << std::endl;
-        }
-        int valid_entries = 0;
-        for (int i = 0; i < data.size(); i+=32) {
-            if (extract_with_endian(data, i, 1) == 0x0) {
-                continue;
-            }
-            valid_entries++;
-        }
-        std::cout << "Valid directory entries in cluster: " << valid_entries << std::endl;
+            for (std::uint32_t cluster_index = 0; cluster_index < chain.size(); cluster_index++) {
+                auto data = read_cluster(chain[cluster_index]);
 
                 for (int i = 0; i < data.size(); i+=32) {
                     if (extract_with_endian(data, i, 1) == 0x0) {
@@ -426,31 +420,6 @@ class Disk {
                     LFN = "";
                     folder.files.push_back(file);
                 }
-
-                std::cout << "Getting next cluster..." << std::endl;
-                std::cout << "Before cluster index is " << cluster_index << std::endl;
-                cluster_index = get_next_claster_index(cluster_index);
-                std::cout << "After cluster index is " << cluster_index << std::endl;
-
-
-                // Сразу проверяем EOC
-        if (cluster_index >= FAT_EOC_MIN && cluster_index <= FAT_EOC_MAX) {
-            std::cout << "EOC detected! Stopping." << std::endl;
-            break;
-        }
-        
-        // Защита от бесконечного цикла
-        if (cluster_count > 100) {
-            std::cout << "ERROR: Too many clusters! Possible infinite loop." << std::endl;
-            break;
-        }
-            }
-            if (cluster_index == FAT_BAD) {
-                throw std::string("Chain of clusters end in bad cluster");
-            }
-            if (!(FAT_EOC_MIN <= cluster_index && cluster_index <= FAT_EOC_MAX)) {
-                std::cerr << "Bad Cluster index : 0x" << std::hex << cluster_index << std::dec << std::endl;
-                throw std::string("Chain of clusters end in not EOC cluster");
             }
             if (next != "")
                 previous_path.push_back(next);
@@ -488,6 +457,14 @@ class Disk {
             return folder;
         }
 
+        void get_file(std::uint32_t first_claster, std::string &destination) {
+            auto chain = get_claster_chain(first_claster);
+            destination = "";
+            for (int i = 0; i < chain.size(); i++) {
+                destination += read_cluster(chain[i]);
+            }
+        }
+
         ~Disk() {
             try {
                 unmount();
@@ -505,13 +482,6 @@ class Terminal {
     FAT::Folder current_folder, root_folder, temp_folder;
     FAT::Disk disk;
 public:
-    void Init(FAT::Disk& disk) {
-        if (!disk.is_mounted())
-            throw std::string("Disk is not mounted. Impossible to Init Terminal");
-        root_folder = disk.parse_root_folder();
-        current_folder = root_folder;
-    }
-
     void mount(std::string path) {
         disk.mount(path);
         root_folder = disk.parse_root_folder();
@@ -536,19 +506,27 @@ public:
     }
 
     void show_folder(FAT::Folder folder) {
-        for (int i = 0; i < folder.files.size() && i < 10; i++) {
-            std::cout << "0x" << std::hex << folder.files[i].attr << "\tis del : " << folder.files[i].is_deleted << "\tfirst byte : "
-             << static_cast<unsigned int>(static_cast<unsigned char>(folder.files[i].name[0])) << std::dec
-             << "\tLFN size : " << folder.files[i].long_name.size() << "\t";
-            if (folder.files[i].long_name != "") {
-                std::cout << folder.files[i].long_name; // << std::endl;
+        for (auto file : folder.files) {
+            // std::cout << "0x" << std::hex << file.attr;
+            std::cout << "del " << file.is_deleted;
+            // std::cout << "\tfirst byte 0x" << char_to_uint(file.name[0]) << std::dec;
+            std::cout << "\tLFN sz " << file.long_name.size() << "\t";
+            if (file.attr & 0x10) {
+                std::cout << "DIR";
+            } else {
+                std::cout << "   ";
+            }
+            std::cout << "\t";
+            
+            if (file.long_name != "") {
+                std::cout << file.long_name; // << std::endl;
                 // for (int j = 0; j < folder.files[i].long_name.size(); j++) {
-                //     std::cout << static_cast<unsigned int>(static_cast<unsigned char>(folder.files[i].long_name[j])) << " ";
+                //     std::cout << char_to_uint(folder.files[i].long_name[j]) << " ";
                 // }
             }
             else {
-                std::string name = folder.files[i].name.substr(0, 8), ext = folder.files[i].name.substr(8);
-                if (folder.files[i].is_deleted) {
+                std::string name = file.name.substr(0, 8), ext = file.name.substr(8);
+                if (file.is_deleted) {
                     name[0] = '?';
                 }
                 name.erase(std::remove(name.begin(), name.end(), ' '), name.end());
@@ -562,55 +540,114 @@ public:
         }
     }
 
-    bool check_names(FAT::Folder &folder, std::string find_name, std::string path_name, bool is_long_name) {
+    bool find_name(FAT::Folder const& folder, std::string const& find_name, bool is_long_name, FAT::File_info &file_req) {
         for (auto file : folder.files) {
-            if (file.long_name == find_name && is_long_name || file.name == find_name && !is_long_name) {
-                if (file.claster_index == 0) {
-                    folder = root_folder;
-                    return true;
-                }
-                if (is_long_name)  {
-                    path_name = file.long_name;
-                }
-                folder = disk.parse_folder(file.claster_index, folder.path, path_name);
+            // std::cout << "FIle name : " << file.name_no_whitespace << std::endl;
+            // std::cout << "full file name : " << file.long_name_lower << std::endl;
+            // std::cout << "Name : " << find_name << std::endl;
+            if (file.long_name_lower == find_name && is_long_name || file.name_no_whitespace == find_name && !is_long_name) {
+                file_req = file;
                 return true;
             }
         }
+        file_req = FAT::File_info();
         return false;
     }
 
-    bool cd_one(std::string& name) {
-        if (name == ".") return true;        
-        if(check_names(temp_folder, to_lower_case(name), "", true))
+    bool find_file_in_folder(FAT::Folder const& folder, std::string const&name, FAT::File_info& file) {
+        if (name == ".") {
+            file = FAT::File_info();
+            file.name = ".";
+            return true;
+        }
+        if(find_name(folder, to_lower_case(name), true, file))
             return true;
         
-        std::string temp_name = name;
-        while (temp_folder.files.size() > 0 && temp_name.size() < temp_folder.files[0].name.size()) {
-            temp_name.push_back(' ');
+        std::string temp_name = remove_whitespace(name);
+        if (temp_name != ".." && temp_name != ".")
+            temp_name = remove_char_from_str(temp_name, '.');
+
+        // удаленные файлы/папки
+        if (char_to_uint(temp_name[0]) == '?') {
+            temp_name[0] = char(0xe5);
         }
-        if(check_names(temp_folder, temp_name, name, false))
+        if(find_name(folder, temp_name, false, file))
             return true;
+        
         return false;
     }
 
-    void cd(std::string path) {
-        std::string atom;
-        std::stringstream ss(path);
-        temp_folder = current_folder;
-        while (std::getline(ss, atom, '/')) {
-            if(!cd_one(atom)) {
-                std::cout << "No such folder : " << path << std::endl;
-                return;
-            }
-            if(temp_folder.path.size() > 0 && temp_folder.path.back() == "..") {
-                temp_folder.path.pop_back();
-                if (temp_folder.path.size() > 0) {
-                    temp_folder.path.pop_back();
-                }
+    bool cd_one(std::string const& name, FAT::Folder const& folder, FAT::Folder &folder_req) {
+        if (name == "~") {
+            folder_req = root_folder;
+            return true;
+        }
+        if (name == ".") {
+            folder_req = folder;
+            return true;
+        }
+        FAT::File_info file;
+        if(!find_file_in_folder(folder, name, file)) {
+            folder_req = FAT::Folder();
+            return false;
+        }
+        
+        if (file.claster_index == 0) {
+            folder_req = root_folder;
+            return true;
+        }
+        folder_req = disk.parse_folder(file.claster_index, folder.path, name);
+        if(folder_req.path.size() > 0 && folder_req.path.back() == "..") {
+            folder_req.path.pop_back();
+            if (folder_req.path.size() > 0) {
+                folder_req.path.pop_back();
             }
         }
-        current_folder = temp_folder;
-        temp_folder = FAT::Folder();
+        return true;
+    }
+
+    bool go_to_folder(std::string path, FAT::Folder const& folder, FAT::Folder &destination_folder) {
+        std::string atom;
+        std::stringstream ss(path);
+        temp_folder = folder;
+        while (std::getline(ss, atom, '/')) {
+            if(!cd_one(atom, temp_folder, temp_folder)) {
+                std::cout << "No such folder : " << path << std::endl;
+                destination_folder = FAT::Folder();
+                return false;
+            }
+        }
+        destination_folder = temp_folder;
+        return true;
+    } 
+
+    void cd(std::string path) {
+        if(go_to_folder(path, current_folder, temp_folder)) {
+            current_folder = temp_folder;
+        }
+    }
+
+    void cat(std::string path) {
+        FAT::Folder folder;
+        std::string file_name;
+
+        if (path.find('/') != std::string::npos) {
+            if (!go_to_folder(path.substr(0, path.find_last_of('/')), current_folder, folder))
+                return;
+            file_name = path.substr(path.find_last_of('/') + 1);
+        } else {
+            folder = current_folder;
+            file_name = path;
+        }
+        // std::cout << "FIle name is : " << file_name << std::endl;
+        FAT::File_info file;
+        if (!find_file_in_folder(folder, file_name, file)) {
+            std::cout << "There is no such file : " << path << std::endl;
+            return;
+        }
+        std::string file_data;
+        disk.get_file(file.claster_index, file_data);
+        std::cout << file_data << std::endl << std::endl;
     }
 
     void ls() {
@@ -618,6 +655,9 @@ public:
         show_folder(current_folder);
     }
 };
+
+
+
 
 
 int main() {
@@ -630,8 +670,25 @@ int main() {
             "pwd", "ls", "dir", "cd", "size", "cat", "cp", "copy"};
 
         while(should_work) {
-            std::string path, source, destination, file, host_file;
-            std::cin>>command;
+            std::string temp, config, prev;
+            std::vector<std::string> paths;
+            std::string full_command;
+            std::getline(std::cin, full_command);
+            std::stringstream line(full_command);
+            std::getline(line, command, ' ');
+            while (std::getline(line, temp, ' ')) {
+                temp = prev + temp;
+                if (temp[0] == '-') {
+                    config += temp;
+                    continue;
+                }
+                if (temp.back() == '\\') {
+                    prev = temp.substr(0, temp.size() - 1) + " ";
+                    continue;
+                }
+                paths.push_back(temp);
+                prev = "";
+            }
             if (command == "help") {
                 std::cout << "This FAT manager is created by Misha Tuzov AI360" << std::endl;
             } else if (command == "exit" || command == "2") {
@@ -640,19 +697,8 @@ int main() {
             } else if (command == "1" || command == "mount") {
                 terminal.unmount();
                 
-                std::cin >> host_file;
-                terminal.mount(host_file);
-                std::cout << "Disk " << host_file << " mounted" << std::endl;
-
-                // auto result = current_disk.read();
-                // std::cout << std::hex;
-                // for (int i = 0; i < result.size(); i++) {
-                //     std::cout << static_cast<unsigned int>(static_cast<unsigned char>(result[i])) << " ";
-                // }
-                // std::cout << std::dec << std::endl;
-
-                // std::cout << std::hex << result << std::dec << std::endl;
-                // std::cout << "Was read : " << result.size() << " bytes" << std::endl;
+                terminal.mount(paths[0]);
+                std::cout << "Disk " << paths[0] << " mounted" << std::endl;
             } else if (true) {
                 if (!terminal.is_mounted()) {
                     std::cout << "Disk is not mounted. Mount before using this command" << std::endl; 
@@ -666,16 +712,12 @@ int main() {
                 } else if (command == "dir") {
                     std::cout << "Not finished" << std::endl;
                 } else if (command == "cd") {
-                    std::cin >> path;
-                    terminal.cd(path);
+                    terminal.cd(paths[0]);
                 } else if (command == "size") {
-                    std::cin >> path;
                     std::cout << "Not finished" << std::endl;
                 } else if (command == "cat") {
-                    std::cin >> file;
-                    std::cout << "Not finished" << std::endl;
+                    terminal.cat(paths[0]);
                 } else if (command == "copy" || command == "cp") {
-                    std::cin >> source >> destination;
                     std::cout << "Not finished" << std::endl;
                 }
             } else {
