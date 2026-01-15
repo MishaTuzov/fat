@@ -80,11 +80,15 @@ struct File_info {
     std::uint32_t low_claster_index = 0;
     std::uint32_t high_claster_index = 0;
     std::uint32_t claster_index = 0;
-    std::uint32_t size = 0;
-    std::uint32_t date_last_access = 0;
-    std::uint32_t year_last_access = 0;
-    std::uint32_t month_last_access = 0;
-    std::uint32_t day_last_access = 0;
+    std::uint64_t size = 0;
+    std::uint32_t date_modify = 0;
+    std::uint32_t year_modify = 0;
+    std::uint32_t month_modify = 0;
+    std::uint32_t day_modify = 0;
+    std::uint32_t time_modify = 0;
+    std::uint32_t hour_modify = 0;
+    std::uint32_t minute_modify = 0;
+    std::uint32_t second_modify = 0;
     std::uint32_t time_modified = 0;
     bool is_folder = false;
     bool is_deleted = false;
@@ -99,6 +103,12 @@ struct LFN_chain {
 struct Folder {
     std::vector<std::string> path;
     std::vector<File_info> files;
+    std::uint64_t max_size_len = 0;
+    std::uint32_t files_amount = 0;
+    std::uint32_t dirs_amount = 0;
+
+    std::uint32_t deleted_files_amount = 0;
+    std::uint32_t deleted_dirs_amount = 0;
 };
 
 class Disk {
@@ -234,10 +244,15 @@ class Disk {
             file_info.size = extract_with_endian(s, offset + 0x1c, 4);
             file_info.attr = extract_with_endian(s, offset + 0x0b, 1);
             
-            // file_info.date_last_access = extract_with_endian(s, offset + 0x12, 2);
-            // file_info.day_last_access = file_info.date_last_access & 0x1F;
-            // file_info.month_last_access = (file_info.date_last_access & 0x1e0) >> 5;
-            // file_info.year_last_access = (file_info.date_last_access & 0xfe00) >> 9;
+            file_info.date_modify = extract_with_endian(s, offset + 0x18, 2);
+            file_info.day_modify = file_info.date_modify & 0x1F;
+            file_info.month_modify = ((file_info.date_modify & 0x1e0) >> 5) - 1;
+            file_info.year_modify = ((file_info.date_modify & 0xfe00) >> 9) + 1980;
+
+            file_info.time_modify = extract_with_endian(s, offset + 0x16, 2);
+            file_info.second_modify = (file_info.date_modify & 0x1F) * 2;
+            file_info.minute_modify = ((file_info.date_modify & 0x7e0) >> 5);
+            file_info.hour_modify = ((file_info.date_modify & 0xf800) >> 11);
 
             file_info.claster_index = file_info.low_claster_index + file_info.high_claster_index * WORD;
             if (file_info.name[0] == static_cast<char>(0xe5)) {
@@ -425,7 +440,8 @@ class Disk {
             if (next != "")
                 previous_path.push_back(next);
             folder.path = previous_path;
-            std::cout << "folder is parsed" << std::endl;
+            // std::cout << "folder is parsed" << std::endl;
+            config_folder(folder);
             return folder;
         }
 
@@ -454,7 +470,8 @@ class Disk {
                 }
             }
 
-            std::cout << "folder is parsed" << std::endl;
+            // std::cout << "folder is parsed" << std::endl;
+            config_folder(folder);
             return folder;
         }
 
@@ -463,6 +480,68 @@ class Disk {
             destination = "";
             for (int i = 0; i < chain.size(); i++) {
                 destination += read_cluster(chain[i]);
+            }
+        }
+
+        static std::string get_file_show_name(File_info const& file) {
+            if (file.long_name != "") {
+                return file.long_name; // << std::endl;
+                // for (int j = 0; j < folder.files[i].long_name.size(); j++) {
+                //     std::cout << char_to_uint(folder.files[i].long_name[j]) << " ";
+                // }
+            }
+            std::string name = file.name.substr(0, 8), ext = file.name.substr(8);
+            if (file.is_deleted) {
+                name[0] = '?';
+            }
+            name.erase(std::remove(name.begin(), name.end(), ' '), name.end());
+            ext.erase(std::remove(ext.begin(), ext.end(), ' '), ext.end());
+            if (ext != "") {
+                ext = "." + ext;
+            }
+            return name + ext;
+        }
+
+        static bool cmp_files_name(File_info const&a, File_info const&b) {
+            return to_lower_case(get_file_show_name(a)) < to_lower_case(get_file_show_name(b));
+        }
+
+        std::int64_t count_size(FAT::Folder const& folder) {
+            std::int64_t sz = 0;
+            for (auto file : folder.files) {
+                if (file.is_folder) {
+                    if (file.name_no_whitespace == "." || file.name_no_whitespace == "..") continue;
+                    auto sub_folder = parse_folder(file.claster_index, {});
+                    sz += count_size(sub_folder);
+                } else {
+                    sz += file.size;
+                }
+            }
+            return sz;
+        }
+
+        void config_folder(Folder & folder) {
+            std::sort(folder.files.begin(), folder.files.end(), cmp_files_name);
+            std::uint64_t max_size = 0;
+            for (auto file : folder.files) {
+                max_size = std::max(max_size, file.size);
+                if (file.is_folder) {
+                    if (!file.is_deleted)
+                        folder.dirs_amount ++;
+                    else
+                        folder.deleted_dirs_amount++;
+                } else {
+                    if (!file.is_deleted)
+                        folder.files_amount ++;
+                    else
+                        folder.deleted_files_amount++;
+                }
+            }
+            folder.max_size_len = 1;
+            std::uint64_t mul = 1;
+            while (mul < max_size) {
+                mul *= 10;
+                folder.max_size_len ++;
             }
         }
 
@@ -506,47 +585,16 @@ public:
         std::cout << std::endl;
     }
 
-    void show_folder(FAT::Folder folder) {
-        for (auto file : folder.files) {
-            // std::cout << "0x" << std::hex << file.attr;
-            std::cout << "del " << file.is_deleted;
-            // std::cout << "\tfirst byte 0x" << char_to_uint(file.name[0]) << std::dec;
-            std::cout << "\tLFN sz " << file.long_name.size() << "\t";
-            if (file.is_folder) {
-                std::cout << "DIR";
-            } else {
-                std::cout << "   ";
-            }
-            std::cout << "\t" << (file.size + 999) / 1000 << "k";
-            std::cout << "\t";
-            
-            if (file.long_name != "") {
-                std::cout << file.long_name; // << std::endl;
-                // for (int j = 0; j < folder.files[i].long_name.size(); j++) {
-                //     std::cout << char_to_uint(folder.files[i].long_name[j]) << " ";
-                // }
-            }
-            else {
-                std::string name = file.name.substr(0, 8), ext = file.name.substr(8);
-                if (file.is_deleted) {
-                    name[0] = '?';
-                }
-                name.erase(std::remove(name.begin(), name.end(), ' '), name.end());
-                ext.erase(std::remove(ext.begin(), ext.end(), ' '), ext.end());
-                if (ext != "") {
-                    ext = "." + ext;
-                }
-                std::cout << name + ext;
-            }
-            std::cout << std::endl;
-        }
+    void show_folder(FAT::Folder folder, std::string const& config) {
+        
     }
 
-    bool find_name(FAT::Folder const& folder, std::string const& find_name, bool is_long_name, FAT::File_info &file_req) {
+    bool find_name(FAT::Folder const& folder, std::string const& find_name, bool is_long_name, FAT::File_info &file_req, bool show_deleted) {
         for (auto file : folder.files) {
             // std::cout << "FIle name : " << file.name_no_whitespace << std::endl;
             // std::cout << "full file name : " << file.long_name_lower << std::endl;
             // std::cout << "Name : " << find_name << std::endl;
+            if (!show_deleted && file.is_deleted) continue;
             if (file.long_name_lower == find_name && is_long_name || file.name_no_whitespace == find_name && !is_long_name) {
                 file_req = file;
                 return true;
@@ -556,13 +604,13 @@ public:
         return false;
     }
 
-    bool find_file_in_folder(FAT::Folder const& folder, std::string const&name, FAT::File_info& file) {
+    bool find_file_in_folder(FAT::Folder const& folder, std::string const&name, FAT::File_info& file, bool show_deleted) {
         if (name == ".") {
             file = FAT::File_info();
             file.name = ".";
             return true;
         }
-        if(find_name(folder, to_lower_case(name), true, file))
+        if(find_name(folder, to_lower_case(name), true, file, show_deleted))
             return true;
         
         std::string temp_name = remove_whitespace(name);
@@ -573,13 +621,13 @@ public:
         if (char_to_uint(temp_name[0]) == '?') {
             temp_name[0] = char(0xe5);
         }
-        if(find_name(folder, temp_name, false, file))
+        if(find_name(folder, temp_name, false, file, show_deleted))
             return true;
         
         return false;
     }
 
-    bool cd_one(std::string const& name, FAT::Folder const& folder, FAT::Folder &folder_req) {
+    bool cd_one(std::string const& name, FAT::Folder const& folder, FAT::Folder &folder_req, bool show_deleted) {
         if (name == "~") {
             folder_req = root_folder;
             return true;
@@ -589,7 +637,7 @@ public:
             return true;
         }
         FAT::File_info file;
-        if(!find_file_in_folder(folder, name, file)) {
+        if(!find_file_in_folder(folder, name, file, show_deleted)) {
             folder_req = FAT::Folder();
             return false;
         }
@@ -608,12 +656,12 @@ public:
         return true;
     }
 
-    bool go_to_folder(std::string path, FAT::Folder const& folder, FAT::Folder &destination_folder) {
+    bool go_to_folder(std::string path, FAT::Folder const& folder, FAT::Folder &destination_folder, bool show_deleted) {
         std::string atom;
         std::stringstream ss(path);
         temp_folder = folder;
         while (std::getline(ss, atom, '/')) {
-            if(!cd_one(atom, temp_folder, temp_folder)) {
+            if(!cd_one(atom, temp_folder, temp_folder, show_deleted)) {
                 std::cout << "No such folder : " << path << std::endl;
                 destination_folder = FAT::Folder();
                 return false;
@@ -623,18 +671,19 @@ public:
         return true;
     } 
 
-    void cd(std::string path) {
-        if(go_to_folder(path, current_folder, temp_folder)) {
+    void cd(std::string path, std::string const& config) {
+        bool show_deleted = (config.find("d") != std::string::npos);
+        if(go_to_folder(path, current_folder, temp_folder, show_deleted)) {
             current_folder = temp_folder;
         }
     }
 
-    void open_file(std::string const& path, std::string &destination) {
+    void open_file(std::string const& path, std::string &destination, bool show_deleted) {
         FAT::Folder folder;
         std::string file_name;
 
         if (path.find('/') != std::string::npos) {
-            if (!go_to_folder(path.substr(0, path.find_last_of('/')), current_folder, folder))
+            if (!go_to_folder(path.substr(0, path.find_last_of('/')), current_folder, folder, show_deleted))
                 return;
             file_name = path.substr(path.find_last_of('/') + 1);
         } else {
@@ -642,49 +691,104 @@ public:
             file_name = path;
         }
         FAT::File_info file;
-        if (!find_file_in_folder(folder, file_name, file)) {
+        if (!find_file_in_folder(folder, file_name, file, show_deleted)) {
             std::cout << "There is no such file : " << path << std::endl;
             return;
         }
         disk.get_file(file.claster_index, destination);
+        destination.erase(destination.begin() + file.size, destination.end());
     }
 
-    void cat(std::string const& path) {
+    void cat(std::string const& path, std::string const& config) {
+        bool show_deleted = (config.find("d") != std::string::npos);
         std::string file_data;
-        open_file(path, file_data);
+        open_file(path, file_data, show_deleted);
         std::cout << file_data << std::endl << std::endl;
     }
 
-    void ls() {
+    void ls(std::string const&config) {
         pwd();
-        show_folder(current_folder);
+        bool show_deleted = (config.find("d") != std::string::npos);
+        bool show_hidden = (config.find("h") != std::string::npos);
+
+        if (config.find("l") == std::string::npos) {
+            for (auto file : current_folder.files) {
+                if (!show_deleted && file.is_deleted) continue;
+                if (!show_hidden && (file.name_no_whitespace == "." || file.name_no_whitespace == "..")) continue;
+                std::cout << disk.get_file_show_name(file);
+                if (file.is_folder) std::cout << "/";
+                std::cout << "\t\t";
+            }
+            std::cout << std::endl;
+            return;
+        }
+        for (auto file : current_folder.files) {
+            if (!show_deleted && file.is_deleted) continue;
+            if (!show_hidden && (file.name_no_whitespace == "." || file.name_no_whitespace == "..")) continue;
+
+            printf("-rw-r--r-- 1\t");
+            printf("%*llu\t", current_folder.max_size_len ,file.size);
+            printf("%s %02u %04u\t", find_mouth[file.month_modify].c_str(), file.day_modify, file.year_modify);
+            // printf("%02u:%02u\t", file.hour_modify, file.minute_modify);
+            std::cout << disk.get_file_show_name(file);
+            if (file.is_folder) std::cout << "/";
+            if (file.is_deleted) std::cout << " [deleted]";
+            std::cout << std::endl;
+        }
     }
 
-    std::int64_t count_size(FAT::Folder const& folder) {
-        std::int64_t sz = 0;
-        for (auto file : folder.files) {
-            if (file.is_folder) {
-                if (file.name_no_whitespace == "." || file.name_no_whitespace == "..") continue;
-                auto sub_folder = disk.parse_folder(file.claster_index, {});
-                sz += count_size(sub_folder);
-            } else {
-                sz += file.size;
-            }
+    void dir(std::string const&config) {
+        bool show_deleted = (config.find("d") != std::string::npos);
+        bool show_short = (config.find("x") != std::string::npos);
+        
+        std::cout << "Dirrectory of ";
+        pwd();
+        std::cout << std::endl;
+
+        for (auto file : current_folder.files) {
+            if (!show_deleted && file.is_deleted) continue;
+
+            if (file.is_deleted)
+                std::cout << "[DELETED]\t"; 
+            
+            printf("%02u/%02u/%04u\t", file.month_modify + 1, file.day_modify, file.year_modify);
+            printf("%02u:%02u\t", file.hour_modify, file.minute_modify);
+                
+            if (file.is_folder) std::cout << "<DIR>";
+            else std::cout << "     ";
+            printf("  %*llu\t", current_folder.max_size_len, file.size);
+
+            
+            if (!show_short)
+                std::cout << disk.get_file_show_name(file);
+            else
+                std::cout << file.name;
+            std::cout << std::endl;
         }
-        return sz;
+
+        auto files_amount = current_folder.files_amount;
+        auto dirs_amount = current_folder.dirs_amount;
+        if (show_deleted) {
+            files_amount += current_folder.deleted_files_amount;
+            dirs_amount += current_folder.deleted_dirs_amount;
+        }
+
+        std::cout << "\t\t\t\t" << files_amount << " File(s) " << disk.count_size(current_folder) << " bytes" << std::endl;
+        std::cout << "\t\t\t\t" << dirs_amount << " Dir(s)" << std::endl;
     }
 
     std::int64_t get_size(std::string const& path) {
         FAT::Folder folder;
-        if (!go_to_folder(path, current_folder, folder))
+        if (!go_to_folder(path, current_folder, folder, false))
             return -1;
         std::cout << "OK we find the folder" << std::endl;
-        return count_size(folder);
+        return disk.count_size(folder);
     }
 
-    void copy(std::string const& source, std::string const& destination) {
+    void copy(std::string const& source, std::string const& destination, std::string const& config) {
+        bool show_deleted = (config.find("d") != std::string::npos);
         std::string file_data;
-        open_file(source, file_data);
+        open_file(source, file_data, show_deleted);
         auto fd = fopen(destination.c_str(), "wb+");
         if (!fd) {
             throw std::string("Failed to open file : " + destination);
@@ -719,7 +823,7 @@ int main() {
             std::getline(line, command, ' ');
             while (std::getline(line, temp, ' ')) {
                 temp = prev + temp;
-                if (temp[0] == '-') {
+                if (temp[0] == '-' || temp[0] == '/') {
                     config += temp;
                     continue;
                 }
@@ -749,19 +853,19 @@ int main() {
                 } else if (command == "pwd") {
                     terminal.pwd();
                 } else if (command == "ls") {
-                    terminal.ls();
+                    terminal.ls(config);
                 } else if (command == "dir") {
-                    std::cout << "Not finished" << std::endl;
+                    terminal.dir(config);
                 } else if (command == "cd") {
-                    terminal.cd(paths[0]);
+                    terminal.cd(paths[0], config);
                 } else if (command == "size") {
                     std::int64_t result = terminal.get_size(paths[0]);
                     if (result != -1)
                         std::cout << "Size of folder " << paths[0] << " : " << result << " bytes" << std::endl;
                 } else if (command == "cat") {
-                    terminal.cat(paths[0]);
+                    terminal.cat(paths[0], config);
                 } else if (command == "copy" || command == "cp") {
-                    terminal.copy(paths[0], paths[1]);
+                    terminal.copy(paths[0], paths[1], config);
                 }
             } else {
                 std::cout << "No such command : " << command << std::endl;
@@ -778,8 +882,5 @@ int main() {
 
 
 // porblems
-// 1) копирование копирует с нулями на конце
-// 2) cat не может в норм символы
-// 3) dir и ls все же в непонятном формате + если размер большой, то \t не спасает
-// 4) не поддрерживаю конфигурации
 // 5) много дебаг вывода
+// 6) FAT16 не работает
