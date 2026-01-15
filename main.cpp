@@ -43,12 +43,28 @@ std::string remove_char_from_str(std::string const&s, char d) {
     return result;
 }
 
+
 namespace FAT {
 const std::uint32_t MIN_SECTOR_SIZE = 512;
 const std::uint32_t BYTE = 256;
 const std::uint32_t WORD = BYTE * BYTE;
 const std::uint32_t DWORD = WORD * WORD;
+
 const std::uint32_t MULS[] = {1, BYTE, WORD, WORD * BYTE, DWORD, DWORD * BYTE, DWORD * WORD, DWORD * WORD * BYTE};
+std::uint64_t extract_with_endian(std::string const& s, int from, int amount, bool is_little_endian = true) {
+    std::uint64_t result = 0;
+    if (is_little_endian) {
+        for (int i = 0; i < amount; i++) {
+            result += static_cast<unsigned char>(s[from + i]) * MULS[i];
+        }
+    }
+    else {
+        for (int i = 0; i < amount; i++) {
+            result += static_cast<unsigned char>(s[from + i]) * MULS[amount - i - 1];
+        }
+    }
+    return result;
+}
 
 const std::uint32_t FAT32_FREE = 0x00000000;
 const std::uint32_t FAT32_CLASTER_MIN = 0x00000002;
@@ -94,11 +110,60 @@ struct File_info {
     bool is_deleted = false;
 };
 
+File_info parse_file_info(std::string const& s, int offset) {
+    File_info file_info;
+    file_info.name = s.substr(offset, 11);
+    file_info.name_no_whitespace = remove_whitespace(file_info.name);
+    file_info.low_claster_index = extract_with_endian(s, offset + 0x1a, 2);
+    file_info.high_claster_index = extract_with_endian(s, offset + 0x14, 2);
+    file_info.size = extract_with_endian(s, offset + 0x1c, 4);
+    file_info.attr = extract_with_endian(s, offset + 0x0b, 1);
+    
+    file_info.date_modify = extract_with_endian(s, offset + 0x18, 2);
+    file_info.day_modify = file_info.date_modify & 0x1F;
+    file_info.month_modify = ((file_info.date_modify & 0x1e0) >> 5) - 1;
+    file_info.year_modify = ((file_info.date_modify & 0xfe00) >> 9) + 1980;
+
+    file_info.time_modify = extract_with_endian(s, offset + 0x16, 2);
+    file_info.second_modify = (file_info.date_modify & 0x1F) * 2;
+    file_info.minute_modify = ((file_info.date_modify & 0x7e0) >> 5);
+    file_info.hour_modify = ((file_info.date_modify & 0xf800) >> 11);
+
+    file_info.claster_index = file_info.low_claster_index + file_info.high_claster_index * WORD;
+    if (file_info.name[0] == static_cast<char>(0xe5)) {
+        file_info.is_deleted = true;
+    }
+    file_info.is_folder = static_cast<bool>(file_info.attr & 0x10);
+    return file_info;
+}
+
 struct LFN_chain {
     std::string name_part = "";
     std::uint32_t check_sum = 0;
     std::uint32_t attr = 0;
 };
+
+LFN_chain parse_LFN(std::string const& s, int offset) {
+    LFN_chain lfn;
+    for (int i = 0; i < 10; i += 2) {
+        char c = s[offset + 0x01 + i];
+        if (c == char(0x00) || c == char(0xFF)) break;
+        lfn.name_part.push_back(c);
+    }
+    for (int i = 0; i < 12; i += 2) {
+        char c = s[offset + 0x0E + i];
+        if (c == char(0x00) || c == char(0xFF)) break;
+        lfn.name_part.push_back(c);
+    }            
+    for (int i = 0; i < 4; i += 2) {
+        char c = s[offset + 0x1C + i];
+        if (c == char(0x00) || c == char(0xFF)) break;
+        lfn.name_part.push_back(c);
+    }
+    lfn.check_sum = extract_with_endian(s, offset + 0x0d, 1);
+    lfn.attr = extract_with_endian(s, offset + 0x0b, 1);
+    return lfn;
+}
 
 struct Folder {
     std::vector<std::string> path;
@@ -112,7 +177,7 @@ struct Folder {
 };
 
 class Disk {
-        FILE* fd;
+        FILE* fd = nullptr;
         
         FAT_TYPES fat_type = FAT_TYPES::NOT_FAT;
 
@@ -142,23 +207,7 @@ class Disk {
         std::uint32_t FAT_EOC_MIN = 0;
         std::uint32_t FAT_EOC_MAX = 0;
         std::uint32_t FAT_INDEX_LEN = 0;
-
     private:
-        std::uint64_t extract_with_endian(std::string const& s, int from, int amount, bool is_little_endian = true) {
-            std::uint64_t result = 0;
-            if (is_little_endian) {
-                for (int i = 0; i < amount; i++) {
-                    result += static_cast<unsigned char>(s[from + i]) * MULS[i];
-                }
-            }
-            else {
-                for (int i = 0; i < amount; i++) {
-                    result += static_cast<unsigned char>(s[from + i]) * MULS[amount - i - 1];
-                }
-            }
-            return result;
-        }
-
         void read_boot_sector() {
             auto sector_info = read();
 
@@ -234,55 +283,6 @@ class Disk {
             std::cout << "COUNT_OF_CLUSTERS " << COUNT_OF_CLUSTERS << std::endl;
             std::cout << "FIRST_ROOT_DIR_SECTOR " << FIRST_ROOT_DIR_SECTOR << std::endl;
         }
-    
-        File_info parse_file(std::string const& s, int offset) {
-            File_info file_info;
-            file_info.name = s.substr(offset, 11);
-            file_info.name_no_whitespace = remove_whitespace(file_info.name);
-            file_info.low_claster_index = extract_with_endian(s, offset + 0x1a, 2);
-            file_info.high_claster_index = extract_with_endian(s, offset + 0x14, 2);
-            file_info.size = extract_with_endian(s, offset + 0x1c, 4);
-            file_info.attr = extract_with_endian(s, offset + 0x0b, 1);
-            
-            file_info.date_modify = extract_with_endian(s, offset + 0x18, 2);
-            file_info.day_modify = file_info.date_modify & 0x1F;
-            file_info.month_modify = ((file_info.date_modify & 0x1e0) >> 5) - 1;
-            file_info.year_modify = ((file_info.date_modify & 0xfe00) >> 9) + 1980;
-
-            file_info.time_modify = extract_with_endian(s, offset + 0x16, 2);
-            file_info.second_modify = (file_info.date_modify & 0x1F) * 2;
-            file_info.minute_modify = ((file_info.date_modify & 0x7e0) >> 5);
-            file_info.hour_modify = ((file_info.date_modify & 0xf800) >> 11);
-
-            file_info.claster_index = file_info.low_claster_index + file_info.high_claster_index * WORD;
-            if (file_info.name[0] == static_cast<char>(0xe5)) {
-                file_info.is_deleted = true;
-            }
-            file_info.is_folder = static_cast<bool>(file_info.attr & 0x10);
-            return file_info;
-        }
-
-        LFN_chain parse_LFN(std::string const& s, int offset) {
-            LFN_chain lfn;
-            for (int i = 0; i < 10; i += 2) {
-                char c = s[offset + 0x01 + i];
-                if (c == char(0x00) || c == char(0xFF)) break;
-                lfn.name_part.push_back(c);
-            }
-            for (int i = 0; i < 12; i += 2) {
-                char c = s[offset + 0x0E + i];
-                if (c == char(0x00) || c == char(0xFF)) break;
-                lfn.name_part.push_back(c);
-            }            
-            for (int i = 0; i < 4; i += 2) {
-                char c = s[offset + 0x1C + i];
-                if (c == char(0x00) || c == char(0xFF)) break;
-                lfn.name_part.push_back(c);
-            }
-            lfn.check_sum = extract_with_endian(s, offset + 0x0d, 1);
-            lfn.attr = extract_with_endian(s, offset + 0x0b, 1);
-            return lfn;
-        }
 
         std::uint32_t get_next_claster_index(std::uint32_t current) {
             if (current > COUNT_OF_CLUSTERS + 1 || current > FAT_CLASTER_MAX || current < FAT_CLASTER_MIN) {
@@ -311,10 +311,6 @@ class Disk {
             return chain;
         }
     public:
-        Disk() {
-            fd = nullptr;
-        }
-
         bool is_mounted() {
             return fd != nullptr;
         }
@@ -385,7 +381,6 @@ class Disk {
                 first_cluster = ROOT_CATALOG_CLASTER_INDEX;
             }
 
-
             Folder folder;
             std::string LFN = "";
 
@@ -397,7 +392,7 @@ class Disk {
                     if (extract_with_endian(data, i, 1) == 0x0) {
                         continue; // все же тут break или continue???
                     }
-                    File_info file = parse_file(data, i);
+                    File_info file = parse_file_info(data, i);
                     if (file.attr == 0x0f) {
                         LFN_chain lfn = parse_LFN(data, i);
                         LFN = lfn.name_part + LFN;
@@ -430,7 +425,7 @@ class Disk {
                     if (extract_with_endian(data, i, 1) == 0x0) {
                         continue; // все же тут break или continue???
                     }
-                    File_info file = parse_file(data, i);
+                    File_info file = parse_file_info(data, i);
                     if (file.attr == 0x0f) {
                         LFN_chain lfn = parse_LFN(data, i);
                         LFN = lfn.name_part + LFN;
@@ -473,20 +468,6 @@ class Disk {
 
         static bool cmp_files_name(File_info const&a, File_info const&b) {
             return to_lower_case(get_file_show_name(a)) < to_lower_case(get_file_show_name(b));
-        }
-
-        std::int64_t count_size(FAT::Folder const& folder) {
-            std::int64_t sz = 0;
-            for (auto file : folder.files) {
-                if (file.is_folder) {
-                    if (file.name_no_whitespace == "." || file.name_no_whitespace == "..") continue;
-                    auto sub_folder = parse_folder(file.claster_index, {});
-                    sz += count_size(sub_folder);
-                } else {
-                    sz += file.size;
-                }
-            }
-            return sz;
         }
 
         void config_folder(Folder & folder) {
@@ -733,15 +714,29 @@ public:
             dirs_amount += current_folder.deleted_dirs_amount;
         }
 
-        std::cout << "\t\t\t\t" << files_amount << " File(s) " << disk.count_size(current_folder) << " bytes" << std::endl;
+        std::cout << "\t\t\t\t" << files_amount << " File(s) " << count_size(current_folder) << " bytes" << std::endl;
         std::cout << "\t\t\t\t" << dirs_amount << " Dir(s)" << std::endl;
+    }
+
+    std::int64_t count_size(FAT::Folder const& folder) {
+        std::int64_t sz = 0;
+        for (auto file : folder.files) {
+            if (file.is_folder) {
+                if (file.name_no_whitespace == "." || file.name_no_whitespace == "..") continue;
+                auto sub_folder = disk.parse_folder(file.claster_index, {});
+                sz += count_size(sub_folder);
+            } else {
+                sz += file.size;
+            }
+        }
+        return sz;
     }
 
     std::int64_t get_size(std::string const& path) {
         FAT::Folder folder;
         if (!go_to_folder(path, current_folder, folder, false))
             return -1;
-        return disk.count_size(folder);
+        return count_size(folder);
     }
 
     void copy(std::string const& source, std::string const& destination, std::string const& config) {
@@ -791,18 +786,30 @@ int main() {
             }
             if (command == "help") {
                 std::cout << "This FAT manager is created by Misha Tuzov AI360" << std::endl;
+                std::cout << "Here is list of cammands: " << std::endl;
+                std::cout << "1) help" << std::endl;
+                std::cout << "2) exit" << std::endl;
+                std::cout << "3) mount|host_file [path]" << std::endl;
+                std::cout << "4) unmount" << std::endl;
+                std::cout << "5) pwd" << std::endl;
+                std::cout << "6) ls -l -d (deleted files) -h (. and .. dirs)" << std::endl;
+                std::cout << "7) dir /x /d (deleted files)" << std::endl;
+                std::cout << "8) cd [path] -d (go in deleted)" << std::endl;
+                std::cout << "9) size [path]" << std::endl;
+                std::cout << "10) cat [file] -d (deleted files)" << std::endl;
+                std::cout << "11) copy|cp [source] [destination] -d (deleted files)" << std::endl;
             } else if (command == "exit" || command == "2") {
                 should_work = false;
                 break;
-            } else if (command == "1" || command == "mount") {
+            } else if (command == "1" || command == "mount" || command == "host_file") {
                 terminal.unmount();
                 
                 terminal.mount(paths[0]);
                 std::cout << "Disk " << paths[0] << " mounted" << std::endl;
-            } else if (true) {
+            } else if (commands_inside_disk.find(command) != commands_inside_disk.end()) {
                 if (!terminal.is_mounted()) {
                     std::cout << "Disk is not mounted. Mount before using this command" << std::endl; 
-                } else if (command == "unmount" || command == "3") {
+                } else if (command == "unmount") {
                     terminal.unmount();
                     std::cout << "Disk unmounted" << std::endl;
                 } else if (command == "pwd") {
