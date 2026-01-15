@@ -103,7 +103,7 @@ struct LFN_chain {
 struct Folder {
     std::vector<std::string> path;
     std::vector<File_info> files;
-    std::uint64_t max_size_len = 0;
+    std::uint32_t max_size_len = 0;
     std::uint32_t files_amount = 0;
     std::uint32_t dirs_amount = 0;
 
@@ -114,7 +114,6 @@ struct Folder {
 class Disk {
         FILE* fd;
         
-        //Consts
         FAT_TYPES fat_type = FAT_TYPES::NOT_FAT;
 
         std::uint32_t SECTOR_SIZE = 0; 
@@ -233,6 +232,7 @@ class Disk {
             std::cout << "FIRST_FAT_SECTOR " << FIRST_FAT_SECTOR << std::endl;
             std::cout << "FIRST_DATA_SECTOR " << FIRST_DATA_SECTOR << std::endl;
             std::cout << "COUNT_OF_CLUSTERS " << COUNT_OF_CLUSTERS << std::endl;
+            std::cout << "FIRST_ROOT_DIR_SECTOR " << FIRST_ROOT_DIR_SECTOR << std::endl;
         }
     
         File_info parse_file(std::string const& s, int offset) {
@@ -296,10 +296,10 @@ class Disk {
 
         std::vector<std::uint32_t> get_claster_chain(std::uint32_t start) {
             std::uint32_t current = start;
-            std::vector<std::uint32_t> chain{current};
+            std::vector<std::uint32_t> chain;
             while (FAT_CLASTER_MIN <= current && current <= std::min(FAT_CLASTER_MAX, COUNT_OF_CLUSTERS + 1)) {
-                current = get_next_claster_index(current);
                 chain.push_back(current);
+                current = get_next_claster_index(current);
             }
             if (current == FAT_BAD) {
                 throw std::string("Chain of clusters end in bad cluster");
@@ -309,35 +309,6 @@ class Disk {
                 throw std::string("Chain of clusters end in not EOC cluster");
             }
             return chain;
-        }
-    
-        void dump_fat_for_cluster(std::uint32_t cluster) {
-            std::uint32_t byte_addres = FIRST_FAT_SECTOR * SECTOR_SIZE + (cluster) * FAT_INDEX_LEN;
-            std::cout << "Here is FAT table around cluster : " << std::dec << cluster << " with byte address " << std::hex << byte_addres << std::dec << std::endl;
-            std::string s = read_sector(byte_addres / SECTOR_SIZE);
-            for (int i = 0; i < s.size(); i++) {
-                std::cout << std::hex << char_to_uint(s[i]) << " ";
-            }
-            std::cout << std::dec << std::endl;
-            std::uint32_t i = byte_addres % SECTOR_SIZE;
-            std::cout << "Here is exact value of asked dword : " << std::hex << char_to_uint(s[i]) << " "
-            << char_to_uint(s[i+1]) << " "
-            << char_to_uint(s[i+2]) << " "
-            << char_to_uint(s[i+3]) << std::dec << std::endl;
-
-
-            byte_addres = FIRST_FAT_SECTOR * SECTOR_SIZE + FAT_TABLE_SECTOR_AMOUNT * SECTOR_SIZE + (cluster) * FAT_INDEX_LEN;
-            std::cout << "Here is FAT2 table around cluster : " << std::dec << cluster << " with byte address " << std::hex << byte_addres << std::dec << std::endl;
-            s = read_sector(byte_addres / SECTOR_SIZE);
-            for (int i = 0; i < s.size(); i++) {
-                std::cout << std::hex << char_to_uint(s[i]) << " ";
-            }
-            std::cout << std::dec << std::endl;
-            i = byte_addres % SECTOR_SIZE;
-            std::cout << "Here is exact value of asked dword : " << std::hex << char_to_uint(s[i]) << " "
-            << char_to_uint(s[i+1]) << " "
-            << char_to_uint(s[i+2]) << " "
-            << char_to_uint(s[i+3]) << std::dec << std::endl;
         }
     public:
         Disk() {
@@ -413,6 +384,8 @@ class Disk {
             if (first_cluster == 0) {
                 first_cluster = ROOT_CATALOG_CLASTER_INDEX;
             }
+
+
             Folder folder;
             std::string LFN = "";
 
@@ -420,7 +393,6 @@ class Disk {
 
             for (std::uint32_t cluster_index = 0; cluster_index < chain.size(); cluster_index++) {
                 auto data = read_cluster(chain[cluster_index]);
-
                 for (int i = 0; i < data.size(); i+=32) {
                     if (extract_with_endian(data, i, 1) == 0x0) {
                         continue; // все же тут break или continue???
@@ -433,6 +405,8 @@ class Disk {
                     }
                     file.long_name += LFN;
                     file.long_name_lower = to_lower_case(file.long_name);
+                    if (LFN != "") {
+                    }
                     LFN = "";
                     folder.files.push_back(file);
                 }
@@ -440,7 +414,6 @@ class Disk {
             if (next != "")
                 previous_path.push_back(next);
             folder.path = previous_path;
-            // std::cout << "folder is parsed" << std::endl;
             config_folder(folder);
             return folder;
         }
@@ -470,7 +443,6 @@ class Disk {
                 }
             }
 
-            // std::cout << "folder is parsed" << std::endl;
             config_folder(folder);
             return folder;
         }
@@ -485,10 +457,7 @@ class Disk {
 
         static std::string get_file_show_name(File_info const& file) {
             if (file.long_name != "") {
-                return file.long_name; // << std::endl;
-                // for (int j = 0; j < folder.files[i].long_name.size(); j++) {
-                //     std::cout << char_to_uint(folder.files[i].long_name[j]) << " ";
-                // }
+                return file.long_name;
             }
             std::string name = file.name.substr(0, 8), ext = file.name.substr(8);
             if (file.is_deleted) {
@@ -585,15 +554,8 @@ public:
         std::cout << std::endl;
     }
 
-    void show_folder(FAT::Folder folder, std::string const& config) {
-        
-    }
-
     bool find_name(FAT::Folder const& folder, std::string const& find_name, bool is_long_name, FAT::File_info &file_req, bool show_deleted) {
         for (auto file : folder.files) {
-            // std::cout << "FIle name : " << file.name_no_whitespace << std::endl;
-            // std::cout << "full file name : " << file.long_name_lower << std::endl;
-            // std::cout << "Name : " << find_name << std::endl;
             if (!show_deleted && file.is_deleted) continue;
             if (file.long_name_lower == find_name && is_long_name || file.name_no_whitespace == find_name && !is_long_name) {
                 file_req = file;
@@ -617,7 +579,6 @@ public:
         if (temp_name != ".." && temp_name != ".")
             temp_name = remove_char_from_str(temp_name, '.');
 
-        // удаленные файлы/папки
         if (char_to_uint(temp_name[0]) == '?') {
             temp_name[0] = char(0xe5);
         }
@@ -727,9 +688,8 @@ public:
             if (!show_hidden && (file.name_no_whitespace == "." || file.name_no_whitespace == "..")) continue;
 
             printf("-rw-r--r-- 1\t");
-            printf("%*llu\t", current_folder.max_size_len ,file.size);
+            printf("%*llu\t", current_folder.max_size_len, static_cast<unsigned long long>(file.size));
             printf("%s %02u %04u\t", find_mouth[file.month_modify].c_str(), file.day_modify, file.year_modify);
-            // printf("%02u:%02u\t", file.hour_modify, file.minute_modify);
             std::cout << disk.get_file_show_name(file);
             if (file.is_folder) std::cout << "/";
             if (file.is_deleted) std::cout << " [deleted]";
@@ -756,7 +716,7 @@ public:
                 
             if (file.is_folder) std::cout << "<DIR>";
             else std::cout << "     ";
-            printf("  %*llu\t", current_folder.max_size_len, file.size);
+            printf("  %*llu\t", current_folder.max_size_len, static_cast<unsigned long long>(file.size));
 
             
             if (!show_short)
@@ -781,7 +741,6 @@ public:
         FAT::Folder folder;
         if (!go_to_folder(path, current_folder, folder, false))
             return -1;
-        std::cout << "OK we find the folder" << std::endl;
         return disk.count_size(folder);
     }
 
@@ -802,13 +761,9 @@ public:
 };
 
 
-
-
-
 int main() {
     try {
         bool should_work = true;
-        // FAT::Disk current_disk;
         Terminal terminal;
         std::string command;
         std::set <std::string> commands_inside_disk = {"unmount",
@@ -879,8 +834,3 @@ int main() {
         std::cerr << "Some unknown error occured" << std::endl;
     }
 }
-
-
-// porblems
-// 5) много дебаг вывода
-// 6) FAT16 не работает
