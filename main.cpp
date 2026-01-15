@@ -243,6 +243,7 @@ class Disk {
             if (file_info.name[0] == static_cast<char>(0xe5)) {
                 file_info.is_deleted = true;
             }
+            file_info.is_folder = static_cast<bool>(file_info.attr & 0x10);
             return file_info;
         }
 
@@ -511,11 +512,12 @@ public:
             std::cout << "del " << file.is_deleted;
             // std::cout << "\tfirst byte 0x" << char_to_uint(file.name[0]) << std::dec;
             std::cout << "\tLFN sz " << file.long_name.size() << "\t";
-            if (file.attr & 0x10) {
+            if (file.is_folder) {
                 std::cout << "DIR";
             } else {
                 std::cout << "   ";
             }
+            std::cout << "\t" << (file.size + 999) / 1000 << "k";
             std::cout << "\t";
             
             if (file.long_name != "") {
@@ -627,7 +629,7 @@ public:
         }
     }
 
-    void cat(std::string path) {
+    void open_file(std::string const& path, std::string &destination) {
         FAT::Folder folder;
         std::string file_name;
 
@@ -639,20 +641,59 @@ public:
             folder = current_folder;
             file_name = path;
         }
-        // std::cout << "FIle name is : " << file_name << std::endl;
         FAT::File_info file;
         if (!find_file_in_folder(folder, file_name, file)) {
             std::cout << "There is no such file : " << path << std::endl;
             return;
         }
+        disk.get_file(file.claster_index, destination);
+    }
+
+    void cat(std::string const& path) {
         std::string file_data;
-        disk.get_file(file.claster_index, file_data);
+        open_file(path, file_data);
         std::cout << file_data << std::endl << std::endl;
     }
 
     void ls() {
         pwd();
         show_folder(current_folder);
+    }
+
+    std::int64_t count_size(FAT::Folder const& folder) {
+        std::int64_t sz = 0;
+        for (auto file : folder.files) {
+            if (file.is_folder) {
+                if (file.name_no_whitespace == "." || file.name_no_whitespace == "..") continue;
+                auto sub_folder = disk.parse_folder(file.claster_index, {});
+                sz += count_size(sub_folder);
+            } else {
+                sz += file.size;
+            }
+        }
+        return sz;
+    }
+
+    std::int64_t get_size(std::string const& path) {
+        FAT::Folder folder;
+        if (!go_to_folder(path, current_folder, folder))
+            return -1;
+        std::cout << "OK we find the folder" << std::endl;
+        return count_size(folder);
+    }
+
+    void copy(std::string const& source, std::string const& destination) {
+        std::string file_data;
+        open_file(source, file_data);
+        auto fd = fopen(destination.c_str(), "wb+");
+        if (!fd) {
+            throw std::string("Failed to open file : " + destination);
+        }
+
+        fwrite(file_data.c_str(), file_data.size(), 1, fd);
+        if (fclose(fd) == EOF) {
+            throw std::string("Failed to close file : " + destination);
+        }
     }
 };
 
@@ -714,11 +755,13 @@ int main() {
                 } else if (command == "cd") {
                     terminal.cd(paths[0]);
                 } else if (command == "size") {
-                    std::cout << "Not finished" << std::endl;
+                    std::int64_t result = terminal.get_size(paths[0]);
+                    if (result != -1)
+                        std::cout << "Size of folder " << paths[0] << " : " << result << " bytes" << std::endl;
                 } else if (command == "cat") {
                     terminal.cat(paths[0]);
                 } else if (command == "copy" || command == "cp") {
-                    std::cout << "Not finished" << std::endl;
+                    terminal.copy(paths[0], paths[1]);
                 }
             } else {
                 std::cout << "No such command : " << command << std::endl;
